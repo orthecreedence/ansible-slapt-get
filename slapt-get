@@ -1,0 +1,202 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+# (c) 2013, Andrew Lyon
+# Written by Andrew Lyon <orthecreedence@gmail.com>
+# Based on apt module written by Afterburn <http://github.com/afterburn>
+#
+# This module is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This software is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this software.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+DOCUMENTATION = '''
+---
+module: slapt-get
+short_description: Manages slapt-get-packages
+description:
+  - Manages I(slapt-get) packages (such as for Slackware).
+version_added: "0.0.1"
+options:
+  pkg:
+    description:
+      - A package name or package specifier with version, like C(foo) or C(foo=1.0). Shell like wildcards (fnmatch) like aptt* are also supported.
+    required: true
+    default: null
+  state:
+    description:
+      - Indicates the desired package state
+    required: false
+    default: present
+    choices: [ "latest", "absent", "present" ]
+  update:
+    description:
+      - Run the equivalent of C(slapt-get --update) before the operation. Can be run as part of the package installation or as a separate step
+    required: false
+    default: "no"
+    choices: [ "yes", "no" ]
+requirements: [ slapt-get ]
+author: Andrew Lyon
+notes: []
+'''
+
+EXAMPLES = '''
+# Update repositories cache and install "foo" package
+- slapt-get: pkg=foo update=yes
+
+# Remove "foo" package
+- slapt-get: pkg=foo state=absent
+
+# Install the package "foo"
+- slapt-get: pkg=foo state=present
+
+# Install latest version of "openjdk-6-jdk" ignoring "install-recommends"
+- slapt-get: pkg=openjdk-6-jdk state=latest install_recommends=no
+'''
+
+
+import json
+import shlex
+import os
+import re
+import sys
+
+SLAPT_PATH = "/usr/sbin/slapt-get"
+
+def query_package(module, name):
+
+    # return if the package is the latest version installed
+    if module.params["state"] == "latest":
+        rc = os.system("sh -c '[ \"`slapt-get --search {0} | egrep {0}-[0-9] | sort -V -r | head -1 | grep inst=yes`\" != \"\" ]'".format(name))
+        if rc == 0:
+            # yes, the package is the latest version
+            return True
+        # package is NOT the latest version
+        return False
+    
+    # if we aren't looking for the latest, just return if it's installed or not
+    rc = os.system("sh -c '[ \"`slapt-get --search {0} | egrep {0}-[0-9] | grep inst=yes`\" != \"\" ]'".format(name))
+    if rc == 0:
+        # installed!
+        return True
+    # not installed!
+    return False
+
+
+def update_package_db(module):
+    rc = os.system("slapt-get --update")
+
+    if rc != 0:
+        module.fail_json(msg="could not update package db")
+         
+
+def remove_packages(module, packages):
+    remove_c = 0
+    # Using a for loop incase of error, we can report the package that failed
+    for package in packages:
+        # Query the package first, to see if we even need to remove
+        if not query_package(module, package):
+            continue
+
+        rc = os.system("slapt-get --no-prompt --remove %s" % (package))
+
+        if rc != 0:
+            module.fail_json(msg="failed to remove %s" % (package))
+    
+        remove_c += 1
+
+    if remove_c > 0:
+        module.exit_json(changed=True, msg="removed %s package(s)" % remove_c)
+
+    module.exit_json(changed=False, msg="package(s) already absent")
+
+
+def install_packages(module, packages):
+
+    install_c = 0
+
+    for i, package in enumerate(packages):
+        if query_package(module, package):
+            continue
+
+        if module.params["state"] == "latest":
+            upgrade=""
+        else:
+            upgrade="--no-upgrade"
+        rc = os.system("slapt-get --no-prompt --install %s %s" % (upgrade, package))
+
+        if rc != 0:
+            module.fail_json(msg="failed to install %s" % (package))
+
+        install_c += 1
+    
+    if install_c > 0:
+        module.exit_json(changed=True, msg="installed %s package(s)" % (install_c))
+
+    module.exit_json(changed=False, msg="package(s) already installed")
+
+
+def check_packages(module, packages, state):
+    would_be_changed = []
+    for package in packages:
+        installed = query_package(module, package)
+        if (((state == "present" or state == "latest") and not installed) or
+                (state == "absent" and installed)):
+            would_be_changed.append(package)
+    if would_be_changed:
+        if state == "absent":
+            state = "removed"
+        if state == "latest":
+            state = "upgraded"
+        module.exit_json(changed=True, msg="%s package(s) would be %s" % (
+            len(would_be_changed), state))
+    else:
+        module.exit_json(change=False, msg="package(s) already %s" % state)
+
+
+def main():
+    module = AnsibleModule(
+            argument_spec = dict(
+                name = dict(aliases=["pkg"]),
+                state = dict(default="present", choices=["present","absent","latest"]),
+                update = dict(default="no", aliases=["update-cache"], type='bool')),
+            supports_check_mode = True)
+                
+
+    if not os.path.exists(SLAPT_PATH):
+        module.fail_json(msg="cannot find slapt-get, looking for %s" % (SLAPT_PATH))
+
+    p = module.params
+
+    if p["update"] and not module.check_mode:
+        update_package_db(module)
+
+        if not p["name"]:
+            module.exit_json(change=True, msg="package cache updated");
+
+    pkgs = p["name"].split(",")
+
+    if module.check_mode:
+        check_packages(module, pkgs, p['state'])
+
+    if p["state"] == "present" or p["state"] == "latest":
+        install_packages(module, pkgs)
+
+    elif p["state"] == "absent":
+        remove_packages(module, pkgs)
+
+    module.fail_json(msg="Didn't run correctly.")
+
+# this is magic, see lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+    
+main() 
