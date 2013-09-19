@@ -35,7 +35,11 @@ The state of the package. Possible values: `absent` `present` `latest`
 
 ##### update (optional)
 Whether or not to update the package sources (`slapt-get --update`) before
-running the operation.
+running the operation. Can be used standalone:
+
+```bash
+ansible www -m slapt-get -a 'update=yes'
+```
 
 License
 -------
